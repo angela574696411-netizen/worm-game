@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>지렁이 게임</title>
+<style>
+  :root { --bg:#1b2a1b; --panel:#243824; --fg:#e8f5e0; --accent:#8bd450; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center;
+         background:var(--bg); color:var(--fg); font-family:"Malgun Gothic",system-ui,sans-serif; user-select:none; }
+  h1 { margin:0 0 6px; font-size:26px; color:var(--accent); }
+  .bar { display:flex; gap:24px; margin-bottom:8px; font-size:18px; }
+  .wrap { position:relative; }
+  canvas { display:block; background:#2f4a2a; border:4px solid var(--panel); border-radius:10px;
+           width:min(94vw, calc(100vh - 190px)); height:auto; touch-action:none; }
+  .overlay { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+             background:rgba(0,0,0,.6); border-radius:10px; text-align:center; gap:10px; }
+  .overlay.hidden { display:none; }
+  .overlay h2 { margin:0; font-size:30px; }
+  button { background:var(--accent); color:#10200a; border:0; padding:10px 24px; font-size:18px; border-radius:8px; cursor:pointer; font-weight:bold; }
+  button:hover { filter:brightness(1.1); }
+  .hint { margin-top:8px; font-size:14px; opacity:.75; text-align:center; }
+  .pad { display:none; margin-top:10px; grid-template-columns:repeat(3,60px); grid-template-rows:repeat(2,60px); gap:6px; }
+  .pad button { padding:0; font-size:24px; }
+  @media (pointer:coarse) { .pad { display:grid; } }
+</style>
+</head>
+<body>
+  <h1>🐛 지렁이 게임</h1>
+  <div class="bar"><span>점수: <b id="score">0</b></span><span>최고: <b id="best">0</b></span><span id="enemyStat">🟣 적군: 대기</span></div>
+  <div class="wrap">
+    <canvas id="c" width="768" height="768"></canvas>
+    <div class="overlay" id="ov">
+      <h2 id="ovTitle">지렁이 게임</h2>
+      <div id="ovMsg">사과를 먹고 길어지세요!<br>보라색 적군 지렁이를 조심하세요.<br>적군이 벽이나 몸에 부딪혀 죽으면 +50점!</div>
+      <button id="startBtn">시작하기</button>
+    </div>
+  </div>
+  <div class="pad">
+    <span></span><button data-d="U">▲</button><span></span>
+    <button data-d="L">◀</button><button data-d="D">▼</button><button data-d="R">▶</button>
+  </div>
+  <div class="hint">방향키 / WASD로 이동 · 스페이스바: 일시정지 · 모바일은 스와이프</div>
+
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const N = 32, S = cv.width / N, FOODS = 4, RESPAWN = 40;
+const scoreEl = document.getElementById('score'), bestEl = document.getElementById('best'), enemyEl = document.getElementById('enemyStat');
+const ov = document.getElementById('ov'), ovTitle = document.getElementById('ovTitle'), ovMsg = document.getElementById('ovMsg');
+let best = 0;
+try { best = +localStorage.getItem('worm-best') || 0; } catch(e) {}
+bestEl.textContent = best;
+
+const DIRS = { U:[0,-1], D:[0,1], L:[-1,0], R:[1,0] };
+const OPP = { U:'D', D:'U', L:'R', R:'L' };
+let worm, dir, queue, foods, score, timer, running, paused, speed;
+let enemy, enemyDir, respawnIn;
+
+function same(a,b) { return a.x===b.x && a.y===b.y; }
+function occupied(p) {
+  return worm.some(s => same(s,p)) || (enemy && enemy.some(s => same(s,p)));
+}
+function placeFood() {
+  let f;
+  do { f = { x:Math.floor(Math.random()*N), y:Math.floor(Math.random()*N) }; }
+  while (occupied(f) || foods.some(o => same(o,f)));
+  return f;
+}
+function reset() {
+  const m = N >> 1;
+  worm = [{x:m,y:m+6},{x:m-1,y:m+6},{x:m-2,y:m+6}];
+  dir = 'R'; queue = []; score = 0; speed = 130; paused = false;
+  enemy = null; respawnIn = 20;
+  foods = [];
+  while (foods.length < FOODS) foods.push(placeFood());
+  scoreEl.textContent = 0;
+  updateEnemyStat();
+  draw();
+}
+function updateEnemyStat() {
+  enemyEl.textContent = enemy ? '🟣 적군: 출현 중 (길이 ' + enemy.length + ')'
+                              : '🟣 적군: ' + Math.ceil(respawnIn * speed / 1000) + '초 후 등장';
+}
+function spawnEnemy() {
+  const body = [{x:5,y:4},{x:4,y:4},{x:3,y:4}];
+  if (body.some(occupied)) return false;
+  enemy = body; enemyDir = 'R';
+  return true;
+}
+function start() {
+  reset(); running = true; ov.classList.add('hidden');
+  clearInterval(timer); timer = setInterval(tick, speed);
+}
+function turn(d) {
+  const last = queue.length ? queue[queue.length-1] : dir;
+  if (d !== last && d !== OPP[last] && queue.length < 3) queue.push(d);
+}
+function inBounds(p) { return p.x>=0 && p.y>=0 && p.x<N && p.y<N; }
+
+function enemyMove() {
+  const head = enemy[0];
+  const options = [];
+  for (const d of Object.keys(DIRS)) {
+    if (d === OPP[enemyDir]) continue;
+    const p = { x:head.x+DIRS[d][0], y:head.y+DIRS[d][1] };
+    if (!inBounds(p) || occupied(p)) continue;
+    // 플레이어 머리 바로 옆칸은 위험하니 후순위
+    const near = Math.abs(p.x-worm[0].x) + Math.abs(p.y-worm[0].y) <= 1;
+    // 가장 가까운 사과까지의 거리
+    let dist = 99;
+    for (const f of foods) dist = Math.min(dist, Math.abs(p.x-f.x)+Math.abs(p.y-f.y));
+    // 열린 공간(막다른 길 회피): 앞 칸의 이웃 중 빈칸 개수
+    let free = 0;
+    for (const e of Object.values(DIRS)) {
+      const q = { x:p.x+e[0], y:p.y+e[1] };
+      if (inBounds(q) && !occupied(q)) free++;
+    }
+    options.push({ d, p, score: dist + (near ? 8 : 0) - free * 1.5 + Math.random() * 2 });
+  }
+  if (!options.length) return false;   // 갇힘 → 죽음
+  options.sort((a,b) => a.score - b.score);
+  const pick = options[0];
+  enemyDir = pick.d;
+  enemy.unshift(pick.p);
+  const fi = foods.findIndex(f => same(f, pick.p));
+  if (fi >= 0) { foods[fi] = placeFood(); } else enemy.pop();
+  return true;
+}
+function killEnemy(bonus) {
+  enemy = null; respawnIn = RESPAWN;
+  if (bonus) { score += 50; scoreEl.textContent = score; }
+}
+
+function tick() {
+  if (paused) return;
+  if (queue.length) dir = queue.shift();
+  const h = { x: worm[0].x + DIRS[dir][0], y: worm[0].y + DIRS[dir][1] };
+  if (!inBounds(h)) return gameOver('벽에 부딪혔어요!');
+  if (worm.some(s => same(s,h))) return gameOver('자기 몸에 부딪혔어요!');
+  if (enemy && enemy.some(s => same(s,h))) return gameOver('적군 지렁이에게 당했어요!');
+  worm.unshift(h);
+  const fi = foods.findIndex(f => same(f,h));
+  if (fi >= 0) {
+    score += 10; scoreEl.textContent = score;
+    foods[fi] = placeFood();
+    if (score % 50 === 0 && speed > 70) { speed -= 8; clearInterval(timer); timer = setInterval(tick, speed); }
+  } else worm.pop();
+
+  if (enemy) {
+    if (!enemyMove()) killEnemy(true);
+  } else if (--respawnIn <= 0) {
+    if (!spawnEnemy()) respawnIn = 5;
+  }
+  updateEnemyStat();
+  draw();
+}
+function gameOver(why) {
+  running = false; clearInterval(timer);
+  if (score > best) { best = score; bestEl.textContent = best; try { localStorage.setItem('worm-best', best); } catch(e) {} }
+  ovTitle.textContent = '게임 오버 💀';
+  ovMsg.innerHTML = why + '<br>점수: ' + score;
+  document.getElementById('startBtn').textContent = '다시 하기';
+  ov.classList.remove('hidden');
+}
+
+function rr(x,y,w,h,r) { ctx.beginPath(); ctx.roundRect(x,y,w,h,r); ctx.fill(); }
+function drawWorm(w, d, hue, headColor) {
+  w.forEach((s,i) => {
+    const t = 1 - i / (w.length + 4);
+    ctx.fillStyle = i===0 ? headColor : `hsl(${hue + (1-t)*20} 55% ${30 + t*25}%)`;
+    rr(s.x*S+1, s.y*S+1, S-2, S-2, i===0 ? 9 : 7);
+  });
+  const h = w[0], [dx,dy] = DIRS[d], px = -dy, py = dx;
+  ctx.fillStyle = '#111';
+  for (const k of [-1,1]) {
+    ctx.beginPath();
+    ctx.arc(h.x*S+S/2 + dx*5 + px*5*k, h.y*S+S/2 + dy*5 + py*5*k, 2.5, 0, 7);
+    ctx.fill();
+  }
+}
+function draw() {
+  for (let i=0;i<N;i++) for (let j=0;j<N;j++) {
+    ctx.fillStyle = (i+j)%2 ? '#335230' : '#2f4a2a';
+    ctx.fillRect(i*S,j*S,S,S);
+  }
+  for (const f of foods) {
+    ctx.fillStyle = '#ff6b6b';
+    ctx.beginPath(); ctx.arc(f.x*S+S/2, f.y*S+S/2+1, S/2-3, 0, 7); ctx.fill();
+    ctx.fillStyle = '#6bbf3a'; ctx.fillRect(f.x*S+S/2-1, f.y*S+1, 3, 5);
+  }
+  if (enemy) drawWorm(enemy, enemyDir, 285, '#d79bff');
+  drawWorm(worm, dir, 95, '#b6f06a');
+  if (paused) {
+    ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(0,0,cv.width,cv.height);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 48px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('일시정지', cv.width/2, cv.height/2);
+  }
+}
+
+const keyMap = { ArrowUp:'U', ArrowDown:'D', ArrowLeft:'L', ArrowRight:'R', w:'U', s:'D', a:'L', d:'R', W:'U', S:'D', A:'L', D:'R' };
+addEventListener('keydown', e => {
+  if (keyMap[e.key]) { e.preventDefault(); if (running) turn(keyMap[e.key]); }
+  else if (e.code === 'Space') {
+    e.preventDefault();
+    if (!running) start(); else { paused = !paused; draw(); }
+  }
+});
+document.getElementById('startBtn').onclick = start;
+document.querySelectorAll('.pad button').forEach(b => b.onclick = () => running && turn(b.dataset.d));
+
+let tx, ty;
+cv.addEventListener('touchstart', e => { tx = e.touches[0].clientX; ty = e.touches[0].clientY; }, {passive:true});
+cv.addEventListener('touchend', e => {
+  const dx = e.changedTouches[0].clientX - tx, dy = e.changedTouches[0].clientY - ty;
+  if (Math.max(Math.abs(dx),Math.abs(dy)) < 20 || !running) return;
+  turn(Math.abs(dx) > Math.abs(dy) ? (dx>0?'R':'L') : (dy>0?'D':'U'));
+});
+
+reset();
+</script>
+</body>
+</html>
